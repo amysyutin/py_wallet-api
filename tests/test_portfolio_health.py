@@ -308,6 +308,36 @@ async def test_portfolio_health_marks_static_dev_price_as_estimated(
     }
 
 
+async def test_portfolio_health_recognizes_frankfurter_fiat_price(
+    client: AsyncClient,
+    auth_headers: dict,
+    db_session: AsyncSession,
+):
+    wallet_id = await _create_evm_wallet(client, auth_headers, 107)
+    wallet = await db_session.get(Wallet, wallet_id)
+    assert wallet is not None
+    await _add_wallet_snapshot(
+        db_session,
+        wallet,
+        finished_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+        asset_amount=Decimal("100"),
+        price_usd=Decimal("1.1641"),
+        price_source="frankfurter",
+    )
+
+    response = await client.get("/portfolio/summary", headers=auth_headers)
+
+    assert response.status_code == 200
+    health = response.json()["data_health"]
+    assert health["state"] == "fresh"
+    assert health["price_quality"] == {
+        "state": "complete",
+        "sources": ["frankfurter"],
+        "assets_priced": 1,
+        "assets_total": 1,
+    }
+
+
 async def test_portfolio_health_marks_missing_market_price_as_incomplete(
     client: AsyncClient,
     auth_headers: dict,

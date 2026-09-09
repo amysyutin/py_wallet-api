@@ -193,7 +193,9 @@ class WalletChainIssue(BaseModel):
 
 class WalletPriceQuality(BaseModel):
     state: Literal["complete", "estimated", "incomplete", "unknown"]
-    sources: list[Literal["coingecko", "manual", "static_dev", "unknown"]]
+    sources: list[
+        Literal["coingecko", "frankfurter", "manual", "static_dev", "unknown"]
+    ]
     assets_priced: int
     assets_total: int
 

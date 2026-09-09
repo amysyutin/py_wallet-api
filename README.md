@@ -117,6 +117,12 @@ compatibility but do not limit snapshot collection. Manual wallets use
 `chain_type=solana`; their case-sensitive base58 address must decode to a
 32-byte public key.
 
+Manual balance rows with `price_usd=null` are priced by ticker during the next
+snapshot: supported crypto symbols use CoinGecko, while three-letter ISO 4217
+fiat tickers use the latest Frankfurter `<TICKER>/USD` rate. A supplied
+`price_usd` remains an explicit manual override. Portfolio price quality reports
+Frankfurter separately from manual and CoinGecko prices.
+
 Release metadata can be supplied with `APP_VERSION` (defaults to `0.2.0`) and
 `BUILD_SHA` (defaults to `unknown`). These non-sensitive values are returned by
 `/health`, `/health/live`, and `/health/ready`; `APP_VERSION` is also used for
@@ -234,11 +240,17 @@ curl -X POST http://localhost:8000/wallets \
   -H "Content-Type: application/json" \
   -d '{"label":"Manual BTC","wallet_type":"manual","chain_type":"manual"}'
 
-# Add or update balances (amount * price_usd → value_usd; null price → 0)
+# Add or update balances (blank price asks the snapshot worker for a live ticker price)
 curl -X PUT http://localhost:8000/wallets/1/balances \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"balances":[{"symbol":"BTC","amount":"0.125","price_usd":"68000"}]}'
+
+# Fiat ticker with a live EUR/USD rate on the next snapshot
+curl -X PUT http://localhost:8000/wallets/1/balances \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"balances":[{"symbol":"EUR","amount":"250","price_usd":null}]}'
 
 # List balances and total_usd
 curl http://localhost:8000/wallets/1/balances \

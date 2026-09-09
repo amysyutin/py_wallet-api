@@ -18,6 +18,7 @@ async def _create_wallet_snapshot(
     *,
     wallet: Wallet,
     failed_chain: str | None = None,
+    price_source: str = "coingecko",
 ) -> SnapshotRun:
     now = datetime.now(timezone.utc)
     run = SnapshotRun(
@@ -56,7 +57,7 @@ async def _create_wallet_snapshot(
             amount=Decimal("1"),
             price_usd=Decimal("150"),
             value_usd=Decimal("150"),
-            price_source="coingecko",
+            price_source=price_source,
         )
     )
     if failed_chain:
@@ -169,3 +170,41 @@ async def test_wallet_detail_marks_successful_saved_snapshot_as_updating(
     assert health["state"] == "updating"
     assert health["refresh_in_progress"] is True
     assert health["source"] == "latest_snapshot"
+
+
+async def test_wallet_detail_recognizes_frankfurter_price_source(
+    client: AsyncClient,
+    auth_headers: dict,
+    db_session: AsyncSession,
+):
+    wallet_body = (
+        await client.post(
+            "/wallets",
+            headers=auth_headers,
+            json={
+                "label": "Fiat wallet",
+                "address": "0x0000000000000000000000000000000000000a03",
+                "chain_type": "all",
+            },
+        )
+    ).json()
+    wallet = await db_session.get(Wallet, wallet_body["id"])
+    assert wallet is not None
+    await _create_wallet_snapshot(
+        db_session,
+        wallet=wallet,
+        price_source="frankfurter",
+    )
+
+    response = await client.get(
+        f"/wallets/{wallet.id}/summary",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data_health"]["price_quality"] == {
+        "state": "complete",
+        "sources": ["frankfurter"],
+        "assets_priced": 1,
+        "assets_total": 1,
+    }

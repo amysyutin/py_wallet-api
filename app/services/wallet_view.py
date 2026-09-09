@@ -42,12 +42,13 @@ SNAPSHOT_READ_STATUSES = ("success", "partial_success")
 TOP_ASSETS_LIMIT = 5
 ACTIVE_SNAPSHOT_STATUSES = ("pending", "running")
 BalanceSource = Literal["latest_snapshot", "manual", "none"]
-PriceSource = Literal["coingecko", "manual", "static_dev", "unknown"]
+PriceSource = Literal["coingecko", "frankfurter", "manual", "static_dev", "unknown"]
 PriceQualityState = Literal["complete", "estimated", "incomplete", "unknown"]
 WalletFreshness = Literal["fresh", "aging", "stale", "unknown"]
 WalletHealthState = Literal["fresh", "updating", "partial", "stale"]
 PRICE_SOURCE_ORDER: tuple[PriceSource, ...] = (
     "coingecko",
+    "frankfurter",
     "manual",
     "static_dev",
     "unknown",
@@ -57,6 +58,8 @@ PRICE_SOURCE_ORDER: tuple[PriceSource, ...] = (
 def _normalize_price_source(source: str | None) -> PriceSource:
     if source == "coingecko":
         return "coingecko"
+    if source == "frankfurter":
+        return "frankfurter"
     if source == "manual":
         return "manual"
     if source == "static_dev":

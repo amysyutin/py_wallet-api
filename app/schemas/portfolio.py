@@ -39,7 +39,9 @@ class PortfolioSelectionScope(BaseModel):
 
 class PortfolioAllocationQuality(BaseModel):
     state: Literal["complete", "estimated", "incomplete", "unknown", "empty"]
-    sources: list[Literal["coingecko", "manual", "static_dev", "unknown"]]
+    sources: list[
+        Literal["coingecko", "frankfurter", "manual", "static_dev", "unknown"]
+    ]
     assets_priced: int
     assets_total: int
 
@@ -61,7 +63,9 @@ class PortfolioChainIssue(BaseModel):
 
 class PortfolioPriceQuality(BaseModel):
     state: Literal["complete", "estimated", "incomplete", "unknown"]
-    sources: list[Literal["coingecko", "manual", "static_dev", "unknown"]]
+    sources: list[
+        Literal["coingecko", "frankfurter", "manual", "static_dev", "unknown"]
+    ]
     assets_priced: int
     assets_total: int
 
