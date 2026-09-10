@@ -8,8 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.config import CHAIN_RPC
 
 EVM_AGGREGATE_CHAIN = "all"
+SOLANA_CHAIN = "solana"
 SUPPORTED_CHAINS = set(CHAIN_RPC) | {EVM_AGGREGATE_CHAIN}
 _EVM_ADDRESS_RE = re.compile(r"^0[xX][a-fA-F0-9]{40}$")
+_BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_BASE58_VALUES = {character: index for index, character in enumerate(_BASE58_ALPHABET)}
 
 
 def normalize_evm_address(address: str | None) -> str | None:
@@ -23,6 +26,39 @@ def normalize_evm_address(address: str | None) -> str | None:
     return f"0x{normalized[2:]}"
 
 
+def normalize_solana_address(address: str | None) -> str | None:
+    if address is None:
+        return None
+    normalized = address.strip()
+    if not normalized:
+        return normalized
+
+    try:
+        number = 0
+        for character in normalized:
+            number = number * 58 + _BASE58_VALUES[character]
+    except KeyError:
+        raise ValueError("address must be a base58-encoded Solana public key") from None
+
+    decoded = (
+        number.to_bytes((number.bit_length() + 7) // 8, byteorder="big")
+        if number
+        else b""
+    )
+    leading_zeroes = len(normalized) - len(normalized.lstrip("1"))
+    if len(b"\0" * leading_zeroes + decoded) != 32:
+        raise ValueError("address must decode to a 32-byte Solana public key")
+    return normalized
+
+
+def normalize_wallet_address(wallet_type: str, address: str | None) -> str | None:
+    if wallet_type == "evm":
+        return normalize_evm_address(address)
+    if wallet_type == "solana":
+        return normalize_solana_address(address)
+    return address
+
+
 def validate_wallet_network_state(
     wallet_type: str, chain_type: str, address: str | None
 ) -> None:
@@ -33,6 +69,11 @@ def validate_wallet_network_state(
             raise ValueError("chain_type cannot be 'manual' for EVM wallets")
         if chain_type not in SUPPORTED_CHAINS:
             raise ValueError(f"chain_type must be one of {sorted(SUPPORTED_CHAINS)}")
+    elif wallet_type == "solana":
+        if not address or not address.strip():
+            raise ValueError("address is required for Solana wallets")
+        if chain_type != SOLANA_CHAIN:
+            raise ValueError("chain_type must be 'solana' for Solana wallets")
     elif wallet_type == "manual":
         if chain_type != "manual":
             raise ValueError("chain_type must be 'manual' for manual wallets")
@@ -44,8 +85,8 @@ class WalletCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     label: str = Field(min_length=1, max_length=100)
-    wallet_type: Literal["evm", "manual"] = "evm"
-    address: str | None = Field(default=None, max_length=42)
+    wallet_type: Literal["evm", "solana", "manual"] = "evm"
+    address: str | None = Field(default=None, max_length=44)
     chain_type: str = Field(
         default=EVM_AGGREGATE_CHAIN,
         min_length=1,
@@ -54,11 +95,6 @@ class WalletCreate(BaseModel):
     group_id: int | None = None
     notes: str | None = Field(default=None, max_length=500)
 
-    @field_validator("address")
-    @classmethod
-    def validate_address(cls, value: str | None) -> str | None:
-        return normalize_evm_address(value)
-
     @field_validator("chain_type")
     @classmethod
     def normalize_chain_type(cls, value: str) -> str:
@@ -66,6 +102,7 @@ class WalletCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_wallet_type_rules(self) -> "WalletCreate":
+        self.address = normalize_wallet_address(self.wallet_type, self.address)
         validate_wallet_network_state(self.wallet_type, self.chain_type, self.address)
         return self
 
@@ -74,7 +111,7 @@ class WalletUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     label: str | None = Field(default=None, min_length=1, max_length=100)
-    address: str | None = Field(default=None, max_length=42)
+    address: str | None = Field(default=None, max_length=44)
     chain_type: str | None = Field(default=None, min_length=1, max_length=32)
     group_id: int | None = None
     is_active: bool | None = None
@@ -82,8 +119,8 @@ class WalletUpdate(BaseModel):
 
     @field_validator("address")
     @classmethod
-    def validate_address(cls, value: str | None) -> str | None:
-        return normalize_evm_address(value)
+    def normalize_address_whitespace(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
 
     @field_validator("chain_type")
     @classmethod

@@ -24,6 +24,7 @@ from app.schemas.wallet import (
     WalletSnapshotRead,
     WalletSummaryRead,
     WalletUpdate,
+    normalize_wallet_address,
     validate_wallet_network_state,
 )
 from app.routes import lookup_live_assets, resolve_assets_address
@@ -45,17 +46,24 @@ logger = get_logger(__name__)
 ClientChannelValue = Literal["web", "telegram"]
 
 
-def _is_active_evm_duplicate(exc: IntegrityError) -> bool:
+def _is_active_onchain_duplicate(exc: IntegrityError) -> bool:
     current: BaseException | None = exc
     while current is not None:
-        if getattr(
-            current, "constraint_name", None
-        ) == "uq_wallets_active_evm_address" or "uq_wallets_active_evm_address" in str(
-            current
+        constraint_name = getattr(current, "constraint_name", None)
+        error_text = str(current)
+        for known_constraint in (
+            "uq_wallets_active_evm_address",
+            "uq_wallets_active_solana_address",
         ):
-            return True
+            if constraint_name == known_constraint or known_constraint in error_text:
+                return True
         current = current.__cause__ or current.__context__
     return False
+
+
+def _duplicate_address_detail(wallet_type: str) -> str:
+    network = "Solana" if wallet_type == "solana" else "EVM"
+    return f"An active wallet with this {network} address already exists"
 
 
 async def _trigger_wallet_snapshot_background(
@@ -126,35 +134,41 @@ async def _get_server_activation_channel(
     return "telegram" if telegram_account_id is not None else "web"
 
 
-async def _ensure_unique_active_evm_address(
+async def _ensure_unique_active_onchain_address(
     session: SessionDep,
     *,
     user_id: int,
+    wallet_type: str,
     address: str | None,
     exclude_wallet_id: int | None = None,
 ) -> None:
-    """Reject two active EVM wallets for the same user and address.
+    """Reject duplicate active on-chain wallets for the same owner.
 
-    Ethereum addresses are hexadecimal, so SQL ``lower`` plus whitespace
-    trimming gives us the same canonical key on PostgreSQL and in tests.
+    EVM addresses are hexadecimal and case-insensitive. Solana public keys are
+    base58 strings and remain case-sensitive.
     """
-    if address is None:
+    if address is None or wallet_type not in {"evm", "solana"}:
         return
 
-    normalized_address = address.strip().lower()
+    normalized_address = address.strip()
     query = select(Wallet.id).where(
         Wallet.user_id == user_id,
-        Wallet.wallet_type == "evm",
+        Wallet.wallet_type == wallet_type,
         Wallet.is_active.is_(True),
-        func.lower(func.trim(Wallet.address)) == normalized_address,
     )
+    if wallet_type == "evm":
+        query = query.where(
+            func.lower(func.trim(Wallet.address)) == normalized_address.lower()
+        )
+    else:
+        query = query.where(func.trim(Wallet.address) == normalized_address)
     if exclude_wallet_id is not None:
         query = query.where(Wallet.id != exclude_wallet_id)
 
     if await session.scalar(query) is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="An active wallet with this EVM address already exists",
+            detail=_duplicate_address_detail(wallet_type),
         )
 
 
@@ -179,10 +193,11 @@ async def create_wallet(
         else None
     )
     await _validate_group_id(session, current_user.id, payload.group_id)
-    if payload.wallet_type == "evm":
-        await _ensure_unique_active_evm_address(
+    if payload.wallet_type in {"evm", "solana"}:
+        await _ensure_unique_active_onchain_address(
             session,
             user_id=current_user.id,
+            wallet_type=payload.wallet_type,
             address=payload.address,
         )
 
@@ -200,11 +215,11 @@ async def create_wallet(
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        if not _is_active_evm_duplicate(exc):
+        if not _is_active_onchain_duplicate(exc):
             raise
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="An active wallet with this EVM address already exists",
+            detail=_duplicate_address_detail(payload.wallet_type),
         ) from None
     await session.refresh(wallet)
     if not has_wallet:
@@ -328,10 +343,25 @@ async def update_wallet(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Wallet not found")
 
     updates = payload.model_dump(exclude_unset=True)
-    address_changed = (
-        "address" in updates
-        and (updates["address"] or "").strip().lower()
-        != (wallet.address or "").strip().lower()
+    if "address" in updates:
+        try:
+            updates["address"] = normalize_wallet_address(
+                wallet.wallet_type,
+                updates["address"],
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+    address_changed = "address" in updates and (
+        (updates["address"] or "").strip().lower()
+        if wallet.wallet_type == "evm"
+        else (updates["address"] or "").strip()
+    ) != (
+        (wallet.address or "").strip().lower()
+        if wallet.wallet_type == "evm"
+        else (wallet.address or "").strip()
     )
     if "group_id" in updates:
         await _validate_group_id(session, current_user.id, updates["group_id"])
@@ -350,10 +380,11 @@ async def update_wallet(
             ) from exc
 
     resulting_is_active = updates.get("is_active", wallet.is_active)
-    if wallet.wallet_type == "evm" and resulting_is_active:
-        await _ensure_unique_active_evm_address(
+    if wallet.wallet_type in {"evm", "solana"} and resulting_is_active:
+        await _ensure_unique_active_onchain_address(
             session,
             user_id=current_user.id,
+            wallet_type=wallet.wallet_type,
             address=updates.get("address", wallet.address),
             exclude_wallet_id=wallet.id,
         )
@@ -367,11 +398,11 @@ async def update_wallet(
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        if not _is_active_evm_duplicate(exc):
+        if not _is_active_onchain_duplicate(exc):
             raise
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="An active wallet with this EVM address already exists",
+            detail=_duplicate_address_detail(wallet.wallet_type),
         ) from None
     await session.refresh(wallet)
     return wallet
@@ -406,10 +437,11 @@ async def restore_wallet(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Wallet not found")
 
     if not wallet.is_active:
-        if wallet.wallet_type == "evm":
-            await _ensure_unique_active_evm_address(
+        if wallet.wallet_type in {"evm", "solana"}:
+            await _ensure_unique_active_onchain_address(
                 session,
                 user_id=current_user.id,
+                wallet_type=wallet.wallet_type,
                 address=wallet.address,
                 exclude_wallet_id=wallet.id,
             )
@@ -418,11 +450,11 @@ async def restore_wallet(
             await session.commit()
         except IntegrityError as exc:
             await session.rollback()
-            if not _is_active_evm_duplicate(exc):
+            if not _is_active_onchain_duplicate(exc):
                 raise
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="An active wallet with this EVM address already exists",
+                detail=_duplicate_address_detail(wallet.wallet_type),
             ) from None
         await session.refresh(wallet)
 

@@ -2,9 +2,9 @@
 
 FastAPI service for aggregating and monitoring a crypto portfolio.
 
-The app collects balances from EVM networks, calculates USD values, and stores
-wallet snapshots in PostgreSQL. Supported EVM networks are Ethereum Mainnet,
-Base, BNB Chain, Arbitrum, and Linea.
+The app collects balances from EVM networks and Solana, calculates USD values,
+and stores wallet snapshots in PostgreSQL. Supported EVM networks are Ethereum
+Mainnet, Base, BNB Chain, Arbitrum, and Linea.
 
 The application repository contains the service code, database migrations,
 tests, Docker image, and CI pipeline. Kubernetes manifests are maintained in the
@@ -13,6 +13,7 @@ separate `amysyutin/py_wallet-infra` repository.
 ## Features
 
 - EVM portfolio aggregation across multiple chains.
+- Solana wallet support for persisted SOL, USDC, and USDT snapshots.
 - Native token, USDT, and USDC balance tracking.
 - USD valuation through RPC token balances and CoinGecko native token prices.
 - PostgreSQL persistence with Alembic migrations.
@@ -87,14 +88,14 @@ Authenticated endpoints require `Authorization: Bearer <token>`:
 | `GET` | `/wallet-groups/{id}` | Get a wallet group by ID. |
 | `PATCH` | `/wallet-groups/{id}` | Update a wallet group. |
 | `DELETE` | `/wallet-groups/{id}` | Delete a wallet group (wallets keep `group_id = NULL`). |
-| `POST` | `/wallets` | Add a wallet (`wallet_type`: `evm` or `manual`; EVM requires only `address` and defaults to `chain_type=all`; manual requires `chain_type=manual`, no address). |
+| `POST` | `/wallets` | Add a wallet (`wallet_type`: `evm`, `solana`, or `manual`; Solana requires a base58 public key and `chain_type=solana`). |
 | `GET` | `/wallets` | List active wallets (`?active_only=false` for all). |
 | `GET` | `/wallets/{id}` | Get a wallet by ID. |
 | `GET` | `/wallets/{id}/summary` | Return the saved wallet value/assets plus scoped freshness, source, price quality, active-refresh state, and safe affected-network details. |
 | `GET` | `/wallets/{id}/assets` | Latest persisted EVM portfolio, with a guarded live fallback when no current snapshot exists. |
 | `GET` | `/wallets/{id}/snapshots` | List recent persisted snapshots for one wallet. |
 | `POST` | `/wallets/{id}/snapshots` | Request an explicit snapshot refresh for one active wallet. |
-| `PATCH` | `/wallets/{id}` | Update wallet fields (`label`, `group_id`, `is_active`, `notes`; EVM wallets also `chain_type` and `address`). |
+| `PATCH` | `/wallets/{id}` | Update wallet fields (`label`, `group_id`, `is_active`, `notes`; on-chain wallets also validate `chain_type` and `address`). |
 | `DELETE` | `/wallets/{id}` | Soft-delete a wallet (`is_active=false`). |
 | `GET` | `/wallets/{id}/balances` | List manual balances for a wallet (`total_usd`, per-asset `value_usd`). |
 | `PUT` | `/wallets/{id}/balances` | Upsert manual balances (manual wallets only). |
@@ -103,7 +104,7 @@ Authenticated endpoints require `Authorization: Bearer <token>`:
 | `GET` | `/snapshot-jobs/{id}` | Read owner-scoped refresh progress and terminal status. |
 | `POST` | `/snapshot-jobs/{id}/retry-failed` | Retry only failed chains from an owner-scoped terminal job; reuses an active child retry. |
 | `POST` | `/snapshot` | Create a snapshot for one active wallet or all active EVM wallets; EVM snapshots aggregate the wallet address across all supported EVM chains. |
-| `GET` | `/portfolio?wallet_id=<id>&days=30` | Return snapshot history for a wallet (`total_usd` from multi-chain EVM snapshots). |
+| `GET` | `/portfolio?wallet_id=<id>&days=30` | Return persisted snapshot history for a wallet. |
 | `GET` | `/portfolio/history?group_id=<id>&days=30` | Return an aggregated group history; without `wallet_id` or `group_id`, aggregate all active wallets. |
 | `GET` | `/portfolio/allocation` | Return current allocation; `mode=all` includes exchange assets, while group selections remain wallet-only. |
 | `GET` | `/portfolio/summary` | Return total USD value, top assets, per-source totals, and wallet/exchange health from the latest snapshots. |
@@ -112,7 +113,9 @@ New EVM wallets use `chain_type=all`: every snapshot checks the address across
 all EVM networks enabled in the snapshot service. Legacy per-network values
 (`mainnet`, `base`, `bnb`, `arbitrum`, and `linea`) remain accepted for API
 compatibility but do not limit snapshot collection. Manual wallets use
-`chain_type=manual`.
+`chain_type=manual`. Solana wallets use `wallet_type=solana` and
+`chain_type=solana`; their case-sensitive base58 address must decode to a
+32-byte public key.
 
 Manual balance rows with `price_usd=null` are priced by ticker during the next
 snapshot: supported crypto symbols use CoinGecko, while three-letter ISO 4217
@@ -210,6 +213,22 @@ curl -X PATCH http://localhost:8000/wallets/1 \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"chain_type":"all","address":"0x..."}'
+```
+
+### Solana wallet example
+
+```bash
+# Create a read-only Solana wallet; private keys and seed phrases are never used.
+curl -X POST http://localhost:8000/wallets \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"Solana","wallet_type":"solana","chain_type":"solana","address":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"}'
+
+# Read persisted SOL/SPL balances through the wallet and portfolio contracts.
+curl http://localhost:8000/wallets/1/summary \
+  -H "Authorization: Bearer $TOKEN"
+curl http://localhost:8000/portfolio/summary \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ### Manual wallet example

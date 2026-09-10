@@ -38,6 +38,16 @@ class Wallet(Base):
                 "wallet_type = 'evm' AND is_active IS TRUE AND address IS NOT NULL"
             ),
         ),
+        Index(
+            "uq_wallets_active_solana_address",
+            "user_id",
+            text("btrim(address)"),
+            unique=True,
+            postgresql_where=text(
+                "wallet_type = 'solana' AND is_active IS TRUE "
+                "AND address IS NOT NULL"
+            ),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
