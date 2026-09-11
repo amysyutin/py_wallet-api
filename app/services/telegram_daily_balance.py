@@ -18,7 +18,8 @@ from app.db.models.telegram import (
     TelegramNotificationSettings,
 )
 from app.metrics import TELEGRAM_DIGEST
-from app.schemas.portfolio import PortfolioDataHealth
+from app.schemas.portfolio import PortfolioDataHealth, PortfolioValueChange24h
+from app.services.portfolio_change import portfolio_change_24h
 from app.services.portfolio_health import (
     active_canonical_wallets,
     build_portfolio_data_health,
@@ -34,6 +35,7 @@ MAX_RETRY_AFTER_SECONDS = 24 * 60 * 60
 class PersistedPortfolioDigest:
     total_usd: Decimal
     data_health: PortfolioDataHealth
+    change_24h: PortfolioValueChange24h
 
 
 class TelegramSendError(RuntimeError):
@@ -71,13 +73,31 @@ def format_daily_balance(
     wallets_covered: int | None = None,
     wallets_total: int | None = None,
     manual_wallets: int = 0,
+    change_24h: PortfolioValueChange24h | None = None,
+    alert_threshold_percent: float | None = None,
 ) -> str:
     amount = f"${total_usd:,.2f}"
     timestamp = (
         as_of.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if as_of else None
     )
+    alert_percent = (
+        change_24h.percent
+        if change_24h is not None
+        and change_24h.status == "complete"
+        and change_24h.percent is not None
+        and alert_threshold_percent is not None
+        and abs(change_24h.percent) >= alert_threshold_percent
+        else None
+    )
+    if alert_percent is not None:
+        assert alert_threshold_percent is not None
     if language == "ru":
         lines = ["Ваш портфель", "", f"Общая стоимость: {amount}"]
+        if alert_percent is not None:
+            lines.append(
+                f"⚠️ Изменение за 24 ч: {alert_percent:+.2f}% "
+                f"(порог {alert_threshold_percent:.2f}%)"
+            )
         health_labels = {
             "fresh": "Актуальные",
             "updating": "Обновляются",
@@ -104,6 +124,11 @@ def format_daily_balance(
             lines.append("Обновление выполняется; показан последний сохранённый итог.")
     else:
         lines = ["Your portfolio", "", f"Total value: {amount}"]
+        if alert_percent is not None:
+            lines.append(
+                f"⚠️ 24h change: {alert_percent:+.2f}% "
+                f"(threshold {alert_threshold_percent:.2f}%)"
+            )
         health_labels = {
             "fresh": "Fresh",
             "updating": "Updating",
@@ -251,7 +276,22 @@ async def persisted_portfolio_digest(
         balance_info=balance_info,
         now=now,
     )
-    return PersistedPortfolioDigest(total_usd=total, data_health=data_health)
+    change_24h = await portfolio_change_24h(
+        session,
+        wallets,
+        current_total=total,
+        balance_info=balance_info,
+        price_quality=data_health.price_quality,
+        health_state=data_health.state,
+        freshness=data_health.freshness,
+        chain_issues=data_health.chain_issues,
+        reference_at=now,
+    )
+    return PersistedPortfolioDigest(
+        total_usd=total,
+        data_health=data_health,
+        change_24h=change_24h,
+    )
 
 
 def _is_due(settings: TelegramNotificationSettings, now: datetime) -> date | None:
@@ -356,6 +396,12 @@ async def send_due_daily_balances(
             wallets_covered=health.wallets_covered,
             wallets_total=health.wallets_total,
             manual_wallets=health.manual_wallets,
+            change_24h=digest.change_24h,
+            alert_threshold_percent=(
+                float(notification.alert_threshold_percent)
+                if notification.alert_threshold_percent is not None
+                else None
+            ),
         )
         try:
             bot.send_daily_balance(

@@ -12,6 +12,7 @@ class TelegramSettingsRead(BaseModel):
     timezone: str
     daily_at: time
     language: Literal["ru", "en"]
+    alert_threshold_percent: float | None
     allows_write_to_pm: bool
 
 
@@ -20,6 +21,7 @@ class TelegramSettingsUpdate(BaseModel):
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
     daily_at: time | None = None
     language: Literal["ru", "en"] | None = None
+    alert_threshold_percent: float | None = Field(default=None, ge=0.1, le=1000)
 
     @model_validator(mode="after")
     def reject_explicit_nulls(self) -> "TelegramSettingsUpdate":
