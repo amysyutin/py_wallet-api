@@ -348,6 +348,13 @@ it never performs live RPC in the delivery path. Delivery attempts export
 chat, wallet, job, or address labels. Telegram `400`/`403` send failures disable
 that user's notifications until they opt in again.
 
+Users can optionally set `alert_threshold_percent` (from `0.1` through `1000`)
+through `PATCH /telegram/settings`, or set it to `null` to disable alerts. When
+the persisted 24-hour portfolio comparison is complete and its absolute change
+meets the threshold, the daily digest adds a localized warning with the signed
+percentage. Incomplete, stale, partial, zero-baseline, and exchange-without-
+history comparisons never produce a threshold warning.
+
 ## JWT Auth Security
 
 `JWT_SECRET` is the symmetric signing key for access tokens (HS256).

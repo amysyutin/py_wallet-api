@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
@@ -10,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     Time,
     UniqueConstraint,
@@ -78,6 +80,9 @@ class TelegramNotificationSettings(Base):
     )
     language: Mapped[str] = mapped_column(
         String(2), nullable=False, server_default="en"
+    )
+    alert_threshold_percent: Mapped[Decimal | None] = mapped_column(
+        Numeric(7, 2), nullable=True
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

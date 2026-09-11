@@ -100,6 +100,11 @@ def _response(account, settings) -> TelegramSettingsRead:
         timezone=settings.timezone,
         daily_at=settings.daily_at,
         language=settings.language,
+        alert_threshold_percent=(
+            float(settings.alert_threshold_percent)
+            if settings.alert_threshold_percent is not None
+            else None
+        ),
         allows_write_to_pm=account.allows_write_to_pm,
     )
 
