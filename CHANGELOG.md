@@ -37,6 +37,8 @@ Deployment and platform changes are tracked separately in
 
 ### Changed
 
+- Add direct regression coverage for manual asset normalization, reuse, and
+  separation from contract-backed assets.
 - Stop tracking generated security reports and expand ignore rules for local
   Python, coverage, editor, and operating-system artifacts.
 - Aggregate each EVM wallet address across all enabled networks and canonicalize

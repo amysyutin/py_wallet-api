@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.asset import Asset
+from app.services.asset import get_or_create_manual_asset
 
 
 async def _register_and_login(client: AsyncClient, email: str) -> dict[str, str]:
@@ -301,6 +302,48 @@ async def test_same_symbol_reused_across_users(
         .where(Asset.symbol == "ETH", Asset.chain == "manual")
     )
     assert count == 1
+
+
+async def test_manual_asset_service_normalizes_defaults_and_reuses(db_session):
+    created = await get_or_create_manual_asset(
+        db_session,
+        symbol="  maintenance_coin  ",
+        chain="   ",
+    )
+    reused = await get_or_create_manual_asset(
+        db_session,
+        symbol="MAINTENANCE_COIN",
+        chain="manual",
+    )
+
+    assert reused.id == created.id
+    assert created.symbol == "MAINTENANCE_COIN"
+    assert created.name == "MAINTENANCE_COIN"
+    assert created.chain == "manual"
+    assert created.contract_address is None
+    assert created.decimals == 18
+
+
+async def test_manual_asset_service_does_not_reuse_contract_asset(db_session):
+    contract_asset = Asset(
+        symbol="CONTRACT_COIN",
+        name="Contract coin",
+        contract_address="manual:contract_coin",
+        chain="manual",
+        decimals=6,
+    )
+    db_session.add(contract_asset)
+    await db_session.flush()
+
+    manual_asset = await get_or_create_manual_asset(
+        db_session,
+        symbol="contract_coin",
+        chain="MANUAL",
+    )
+
+    assert manual_asset.id != contract_asset.id
+    assert manual_asset.contract_address is None
+    assert manual_asset.decimals == 18
 
 
 async def test_delete_missing_balance_returns_404(
