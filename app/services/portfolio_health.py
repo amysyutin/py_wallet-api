@@ -23,12 +23,20 @@ from app.schemas.portfolio import (
 )
 
 ACTIVE_SNAPSHOT_STATUSES = ("pending", "running")
-PriceSource = Literal["coingecko", "frankfurter", "manual", "static_dev", "unknown"]
+PriceSource = Literal[
+    "coingecko",
+    "binance_usdt",
+    "frankfurter",
+    "manual",
+    "static_dev",
+    "unknown",
+]
 PriceQualityState = Literal["complete", "estimated", "incomplete", "unknown"]
 PortfolioFreshness = Literal["fresh", "aging", "stale", "unknown"]
 PortfolioHealthState = Literal["fresh", "updating", "partial", "stale"]
 PRICE_SOURCE_ORDER: tuple[PriceSource, ...] = (
     "coingecko",
+    "binance_usdt",
     "frankfurter",
     "manual",
     "static_dev",
@@ -39,6 +47,8 @@ PRICE_SOURCE_ORDER: tuple[PriceSource, ...] = (
 def _normalize_price_source(source: str | None) -> PriceSource:
     if source == "coingecko":
         return "coingecko"
+    if source == "binance_usdt":
+        return "binance_usdt"
     if source == "frankfurter":
         return "frankfurter"
     if source == "manual":

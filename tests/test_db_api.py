@@ -464,6 +464,14 @@ async def test_group_portfolio_history_aggregates_wallet_values_over_time(
         Decimal("300"),
         Decimal("350"),
     ]
+    assert [
+        Decimal(point["sources"]["onchain_usd"]) for point in history.json()["points"]
+    ] == [Decimal("100"), Decimal("300"), Decimal("350")]
+    assert all(
+        point["sources"]["cex_usd"] is None
+        and Decimal(point["sources"]["manual_usd"]) == Decimal("0")
+        for point in history.json()["points"]
+    )
 
 
 async def test_health_ok(client: AsyncClient):
