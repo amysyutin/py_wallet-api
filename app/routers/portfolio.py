@@ -27,6 +27,7 @@ from app.schemas.portfolio import (
     PortfolioChainIssue,
     PortfolioExchangeHealth,
     PortfolioHistory,
+    PortfolioHistorySources,
     PortfolioPoint,
     PortfolioPriceQuality,
     PortfolioSelectionScope,
@@ -36,6 +37,7 @@ from app.schemas.portfolio import (
 )
 from app.services.exchange_portfolio import (
     ExchangePortfolioSnapshot,
+    fetch_exchange_history,
     fetch_exchange_portfolio,
 )
 from app.services.wallet_view import build_wallet_balance_info
@@ -49,6 +51,26 @@ from app.services.portfolio_health import (
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 HISTORY_READ_STATUSES = ("success",)
 ALLOCATION_VISIBLE_ASSETS = 5
+
+
+def _history_sources(
+    balances: dict[int, Decimal],
+    wallet_types: dict[int, str],
+    *,
+    cex_usd: Decimal | None,
+) -> PortfolioHistorySources:
+    onchain = Decimal("0")
+    manual = Decimal("0")
+    for history_wallet_id, total_usd in balances.items():
+        if wallet_types[history_wallet_id] == "manual":
+            manual += total_usd
+        else:
+            onchain += total_usd
+    return PortfolioHistorySources(
+        onchain_usd=onchain,
+        cex_usd=cex_usd,
+        manual_usd=manual,
+    )
 
 
 def _snapshot_observed_at():
@@ -214,7 +236,7 @@ async def _allocation_for_wallets(
                 amount=asset.amount,
                 value_usd=asset.usd_value,
                 price_usd=asset.price_usd,
-                price_source="coingecko" if asset.price_usd is not None else "unknown",
+                price_source=asset.price_source or "unknown",
             )
 
     total = sum((value for _, value in asset_totals.values()), Decimal("0"))
@@ -313,15 +335,25 @@ def _merge_exchange_health(
     quality = data_health.price_quality
     existing_sources = set(quality.sources)
     if exchange.assets:
-        if exchange_assets_priced:
-            existing_sources.add("coingecko")
+        existing_sources.update(
+            asset.price_source or "unknown"
+            for asset in exchange.assets
+            if asset.price_usd is not None
+        )
         if exchange_assets_priced < exchange_assets_total:
             existing_sources.add("unknown")
     quality.assets_priced += exchange_assets_priced
     quality.assets_total += exchange_assets_total
     quality.sources = [
         source
-        for source in ("coingecko", "manual", "static_dev", "unknown")
+        for source in (
+            "coingecko",
+            "binance_usdt",
+            "frankfurter",
+            "manual",
+            "static_dev",
+            "unknown",
+        )
         if source in existing_sources
     ]
     if quality.assets_total == 0:
@@ -598,7 +630,22 @@ async def _portfolio_history(
         wallets = canonical_wallets
 
     wallet_ids = [wallet.id for wallet in wallets]
-    if not wallet_ids:
+    wallet_types = {wallet.id: wallet.wallet_type for wallet in wallets}
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    exchange_history = None
+    if wallet_id is None and group_id is None:
+        exchange_history = await run_in_threadpool(
+            fetch_exchange_history,
+            get_settings(),
+            user_id=current_user.id,
+            since=since,
+        )
+    exchange_points = (
+        list(exchange_history.points)
+        if exchange_history is not None and exchange_history.status == "success"
+        else []
+    )
+    if not wallet_ids and not exchange_points:
         return PortfolioHistory(
             wallet_id=wallet_id,
             group_id=group_id,
@@ -606,10 +653,11 @@ async def _portfolio_history(
             points=[],
         )
 
-    since = datetime.now(timezone.utc) - timedelta(days=days)
     observed_at = _snapshot_observed_at()
-    rows = list(
-        await session.execute(
+    rows: list[tuple[int, datetime, Decimal]] = []
+    first_new_by_wallet: dict[int, datetime] = {}
+    if wallet_ids:
+        new_rows = await session.execute(
             select(
                 WalletSnapshot.wallet_id,
                 observed_at.label("snapshot_at"),
@@ -623,113 +671,159 @@ async def _portfolio_history(
             )
             .order_by(observed_at, WalletSnapshot.id)
         )
-    )
-
-    first_new_rows = await session.execute(
-        select(
-            WalletSnapshot.wallet_id,
-            func.min(observed_at).label("first_snapshot_at"),
+        rows.extend(
+            (row.wallet_id, _aware(row.snapshot_at), row.total_usd) for row in new_rows
         )
-        .join(SnapshotRun, SnapshotRun.id == WalletSnapshot.snapshot_run_id)
-        .where(
-            WalletSnapshot.wallet_id.in_(wallet_ids),
-            WalletSnapshot.status.in_(HISTORY_READ_STATUSES),
-        )
-        .group_by(WalletSnapshot.wallet_id)
-    )
-    first_new_by_wallet = {
-        row.wallet_id: row.first_snapshot_at for row in first_new_rows
-    }
-    legacy_rows = await session.execute(
-        select(Snapshot.wallet_id, Snapshot.snapshot_at, Snapshot.total_usd)
-        .where(
-            Snapshot.wallet_id.in_(wallet_ids),
-            Snapshot.snapshot_at >= since,
-        )
-        .order_by(Snapshot.snapshot_at, Snapshot.id)
-    )
-    rows.extend(
-        row
-        for row in legacy_rows
-        if row.wallet_id not in first_new_by_wallet
-        or row.snapshot_at < first_new_by_wallet[row.wallet_id]
-    )
-
-    rows.sort(key=lambda row: (row.snapshot_at, row.wallet_id))
-    if wallet_id is not None:
-        points = [
-            PortfolioPoint(snapshot_at=row.snapshot_at, total_usd=row.total_usd)
-            for row in rows
-        ]
-    else:
-        latest_before_rank = func.row_number().over(
-            partition_by=WalletSnapshot.wallet_id,
-            order_by=(observed_at.desc(), WalletSnapshot.id.desc()),
-        )
-        latest_before = (
+        first_new_rows = await session.execute(
             select(
                 WalletSnapshot.wallet_id,
-                WalletSnapshot.total_usd,
-                observed_at.label("snapshot_at"),
-                latest_before_rank.label("snapshot_rank"),
+                func.min(observed_at).label("first_snapshot_at"),
             )
             .join(SnapshotRun, SnapshotRun.id == WalletSnapshot.snapshot_run_id)
             .where(
                 WalletSnapshot.wallet_id.in_(wallet_ids),
                 WalletSnapshot.status.in_(HISTORY_READ_STATUSES),
-                observed_at < since,
             )
-            .subquery()
+            .group_by(WalletSnapshot.wallet_id)
         )
-        seed_by_wallet = {
-            row.wallet_id: (row.snapshot_at, row.total_usd)
-            for row in await session.execute(
-                select(
-                    latest_before.c.wallet_id,
-                    latest_before.c.snapshot_at,
-                    latest_before.c.total_usd,
-                ).where(latest_before.c.snapshot_rank == 1)
-            )
+        first_new_by_wallet = {
+            row.wallet_id: _aware(row.first_snapshot_at) for row in first_new_rows
         }
-        legacy_before_rows = await session.execute(
+        legacy_rows = await session.execute(
             select(Snapshot.wallet_id, Snapshot.snapshot_at, Snapshot.total_usd)
             .where(
                 Snapshot.wallet_id.in_(wallet_ids),
-                Snapshot.snapshot_at < since,
+                Snapshot.snapshot_at >= since,
             )
-            .order_by(Snapshot.snapshot_at.desc(), Snapshot.id.desc())
+            .order_by(Snapshot.snapshot_at, Snapshot.id)
         )
-        legacy_seen: set[int] = set()
-        for row in legacy_before_rows:
-            if row.wallet_id in legacy_seen:
-                continue
-            first_new = first_new_by_wallet.get(row.wallet_id)
-            if first_new is not None and row.snapshot_at >= first_new:
-                continue
-            legacy_seen.add(row.wallet_id)
-            current_seed = seed_by_wallet.get(row.wallet_id)
-            if current_seed is None or row.snapshot_at > current_seed[0]:
-                seed_by_wallet[row.wallet_id] = (
-                    row.snapshot_at,
-                    row.total_usd,
+        rows.extend(
+            (row.wallet_id, _aware(row.snapshot_at), row.total_usd)
+            for row in legacy_rows
+            if row.wallet_id not in first_new_by_wallet
+            or _aware(row.snapshot_at) < first_new_by_wallet[row.wallet_id]
+        )
+
+    rows.sort(key=lambda row: (row[1], row[0]))
+    if wallet_id is not None:
+        points = []
+        for history_wallet_id, snapshot_at, total_usd in rows:
+            sources = _history_sources(
+                {history_wallet_id: total_usd},
+                wallet_types,
+                cex_usd=None,
+            )
+            points.append(
+                PortfolioPoint(
+                    snapshot_at=snapshot_at,
+                    total_usd=total_usd,
+                    sources=sources,
                 )
+            )
+    else:
+        seed_by_wallet: dict[int, tuple[datetime, Decimal]] = {}
+        if wallet_ids:
+            latest_before_rank = func.row_number().over(
+                partition_by=WalletSnapshot.wallet_id,
+                order_by=(observed_at.desc(), WalletSnapshot.id.desc()),
+            )
+            latest_before = (
+                select(
+                    WalletSnapshot.wallet_id,
+                    WalletSnapshot.total_usd,
+                    observed_at.label("snapshot_at"),
+                    latest_before_rank.label("snapshot_rank"),
+                )
+                .join(SnapshotRun, SnapshotRun.id == WalletSnapshot.snapshot_run_id)
+                .where(
+                    WalletSnapshot.wallet_id.in_(wallet_ids),
+                    WalletSnapshot.status.in_(HISTORY_READ_STATUSES),
+                    observed_at < since,
+                )
+                .subquery()
+            )
+            seed_by_wallet = {
+                row.wallet_id: (_aware(row.snapshot_at), row.total_usd)
+                for row in await session.execute(
+                    select(
+                        latest_before.c.wallet_id,
+                        latest_before.c.snapshot_at,
+                        latest_before.c.total_usd,
+                    ).where(latest_before.c.snapshot_rank == 1)
+                )
+            }
+            legacy_before_rows = await session.execute(
+                select(Snapshot.wallet_id, Snapshot.snapshot_at, Snapshot.total_usd)
+                .where(
+                    Snapshot.wallet_id.in_(wallet_ids),
+                    Snapshot.snapshot_at < since,
+                )
+                .order_by(Snapshot.snapshot_at.desc(), Snapshot.id.desc())
+            )
+            legacy_seen: set[int] = set()
+            for row in legacy_before_rows:
+                if row.wallet_id in legacy_seen:
+                    continue
+                legacy_at = _aware(row.snapshot_at)
+                first_new = first_new_by_wallet.get(row.wallet_id)
+                if first_new is not None and legacy_at >= first_new:
+                    continue
+                legacy_seen.add(row.wallet_id)
+                current_seed = seed_by_wallet.get(row.wallet_id)
+                if current_seed is None or legacy_at > current_seed[0]:
+                    seed_by_wallet[row.wallet_id] = (
+                        legacy_at,
+                        row.total_usd,
+                    )
+
         balance_by_wallet = {
             seed_wallet_id: total_usd
             for seed_wallet_id, (_, total_usd) in seed_by_wallet.items()
         }
+        cex_usd = next(
+            (
+                point.total_usd
+                for point in reversed(exchange_points)
+                if point.as_of < since
+            ),
+            None,
+        )
+        events = [
+            (snapshot_at, "wallet", history_wallet_id, total_usd)
+            for history_wallet_id, snapshot_at, total_usd in rows
+        ]
+        events.extend(
+            (point.as_of, "cex", 0, point.total_usd)
+            for point in exchange_points
+            if point.as_of >= since
+        )
+        events.sort(key=lambda event: (event[0], event[1], event[2]))
 
         points = []
-        row_index = 0
-        while row_index < len(rows):
-            snapshot_at = rows[row_index].snapshot_at
-            while row_index < len(rows) and rows[row_index].snapshot_at == snapshot_at:
-                row = rows[row_index]
-                balance_by_wallet[row.wallet_id] = row.total_usd
-                row_index += 1
+        event_index = 0
+        while event_index < len(events):
+            snapshot_at = events[event_index][0]
+            while event_index < len(events) and events[event_index][0] == snapshot_at:
+                _, source, history_wallet_id, total_usd = events[event_index]
+                if source == "cex":
+                    cex_usd = total_usd
+                else:
+                    balance_by_wallet[history_wallet_id] = total_usd
+                event_index += 1
+            sources = _history_sources(
+                balance_by_wallet,
+                wallet_types,
+                cex_usd=cex_usd,
+            )
             points.append(
                 PortfolioPoint(
                     snapshot_at=snapshot_at,
-                    total_usd=sum(balance_by_wallet.values(), Decimal("0")),
+                    total_usd=(
+                        sources.onchain_usd
+                        + sources.manual_usd
+                        + (sources.cex_usd or Decimal("0"))
+                    ),
+                    sources=sources,
                 )
             )
 
