@@ -37,6 +37,8 @@ Deployment and platform changes are tracked separately in
 
 ### Changed
 
+- Add direct regression coverage for the scheduled Telegram daily-balance job's
+  result reporting and process exit status.
 - Add direct regression coverage for admin-promotion CLI transaction outcomes,
   messages, and process exit codes.
 - Add direct regression coverage for manual asset normalization, reuse, and
