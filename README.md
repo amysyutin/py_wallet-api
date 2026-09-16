@@ -104,7 +104,7 @@ Authenticated endpoints require `Authorization: Bearer <token>`:
 | `POST` | `/snapshot-jobs/{id}/retry-failed` | Retry only failed chains from an owner-scoped terminal job; reuses an active child retry. |
 | `POST` | `/snapshot` | Create a snapshot for one active wallet or all active EVM wallets; EVM snapshots aggregate the wallet address across all supported EVM chains. |
 | `GET` | `/portfolio?wallet_id=<id>&days=30` | Return snapshot history for a wallet (`total_usd` from multi-chain EVM snapshots). |
-| `GET` | `/portfolio/history?group_id=<id>&days=30` | Return an aggregated group history; without `wallet_id` or `group_id`, aggregate all active wallets. |
+| `GET` | `/portfolio/history?group_id=<id>&days=30` | Return history with on-chain, CEX, and manual source totals; CEX is included only in the unfiltered all-wallet scope. |
 | `GET` | `/portfolio/allocation` | Return current allocation; `mode=all` includes exchange assets, while group selections remain wallet-only. |
 | `GET` | `/portfolio/allocation/targets` | Return the authenticated user's global asset-allocation targets. |
 | `PUT` | `/portfolio/allocation/targets` | Atomically replace or clear global allocation targets; non-empty targets must total exactly 100%. |
@@ -187,9 +187,13 @@ and make exchange health `partial`. Timeouts, missing snapshots, and invalid
 service responses do not fail the portfolio request: wallet totals remain
 available and exchange health becomes `unavailable` with a bounded error type.
 The all-scope allocation includes exchange assets with keys such as
-`exchange:binance:BTC`. Group selections and portfolio history remain
-wallet-only, so 24-hour change is reported unavailable while current exchange
-positions have no matching historical series.
+`exchange:binance:BTC`. Unfiltered portfolio history merges fully valued CEX
+snapshots into the wallet timeline and returns `sources.onchain_usd`,
+`sources.cex_usd`, and `sources.manual_usd` for every point. Historical CEX
+balances use the valuation stored when the exchange snapshot was collected;
+legacy or partially unpriced CEX snapshots are omitted rather than repriced with
+today's quote. Wallet and group history remain wallet-only. The separate 24-hour
+change contract stays unavailable while current exchange assets are present.
 
 Global allocation targets are stored by stable `asset_key`. A non-empty target
 set must contain unique keys, use at most two decimal places, and total exactly

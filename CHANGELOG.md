@@ -14,6 +14,8 @@ Deployment and platform changes are tracked separately in
 
 - Add persisted, user-scoped allocation targets with deterministic deviation and
   rebalancing hints for the global portfolio.
+- Add timestamped on-chain, CEX, and manual source totals to portfolio history,
+  using stored exchange valuations instead of repricing old balances.
 - Recognize Frankfurter fiat exchange rates as a complete live price source in
   wallet and portfolio quality contracts.
 - Add user-scoped Binance balances to portfolio summary and all-scope allocation,
@@ -39,6 +41,12 @@ Deployment and platform changes are tracked separately in
 
 ### Changed
 
+- Add direct regression coverage for the scheduled Telegram daily-balance job's
+  result reporting and process exit status.
+- Add direct regression coverage for admin-promotion CLI transaction outcomes,
+  messages, and process exit codes.
+- Add direct regression coverage for manual asset normalization, reuse, and
+  separation from contract-backed assets.
 - Stop tracking generated security reports and expand ignore rules for local
   Python, coverage, editor, and operating-system artifacts.
 - Aggregate each EVM wallet address across all enabled networks and canonicalize

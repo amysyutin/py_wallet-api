@@ -5,11 +5,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.db.models.snapshot_service import SnapshotRun, WalletSnapshot
+from app.db.models.wallet import Wallet
 from app.services.exchange_portfolio import (
     ExchangeAssetPosition,
+    ExchangeHistoryPoint,
+    ExchangePortfolioHistory,
     ExchangePortfolioSnapshot,
+    fetch_exchange_history,
     fetch_exchange_portfolio,
 )
 
@@ -65,6 +71,86 @@ def test_fetch_exchange_portfolio_is_user_scoped_and_values_known_assets(
         timeout=5.0,
     )
     mock_price.assert_called_once_with("bitcoin")
+
+
+@patch("app.services.exchange_portfolio.get_coin_price_usd_cached")
+@patch("app.services.exchange_portfolio.requests.get")
+def test_fetch_exchange_portfolio_prefers_timestamped_stored_valuation(
+    mock_get,
+    mock_price,
+):
+    response = MagicMock(status_code=200)
+    response.json.return_value = _payload(
+        balances=[
+            {
+                "asset": "BTC",
+                "free": "0.5",
+                "locked": "0",
+                "total": "0.5",
+                "price_usd": "60000",
+                "usd_value": "30000",
+                "price_source": "binance_usdt",
+            }
+        ]
+    )
+    mock_get.return_value = response
+
+    result = fetch_exchange_portfolio(_settings(), user_id=7)
+
+    assert result.status == "success"
+    assert result.total_usd == Decimal("30000")
+    mock_price.assert_not_called()
+
+
+def test_fetch_exchange_history_keeps_only_complete_timestamped_values():
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "snapshots": [
+            _payload(),
+            _payload(
+                balances=[
+                    {
+                        "asset": "BTC",
+                        "free": "0.5",
+                        "locked": "0",
+                        "total": "0.5",
+                        "price_usd": "60000",
+                        "usd_value": "30000",
+                        "price_source": "binance_usdt",
+                    },
+                    {
+                        "asset": "USDT",
+                        "free": "125",
+                        "locked": "0",
+                        "total": "125",
+                        "price_usd": "1",
+                        "usd_value": "125",
+                        "price_source": "binance_usdt",
+                    },
+                ]
+            ),
+        ]
+    }
+    since = datetime(2026, 8, 14, tzinfo=timezone.utc)
+    with patch(
+        "app.services.exchange_portfolio.requests.get",
+        return_value=response,
+    ) as mock_get:
+        result = fetch_exchange_history(_settings(), user_id=7, since=since)
+
+    assert result.status == "success"
+    assert result.points == (
+        ExchangeHistoryPoint(
+            as_of=datetime(2026, 8, 15, 6, 0, 2, tzinfo=timezone.utc),
+            total_usd=Decimal("30125"),
+        ),
+    )
+    mock_get.assert_called_once_with(
+        "http://localhost:8002/internal/exchange-snapshots/history",
+        params={"user_id": "7", "since": since.isoformat(), "limit": "5000"},
+        headers={"X-Internal-Token": "exchange-token"},
+        timeout=5.0,
+    )
 
 
 def test_fetch_exchange_portfolio_does_not_call_service_without_token():
@@ -177,9 +263,15 @@ async def test_summary_includes_exchange_source_health_and_value(
         as_of=datetime.now(timezone.utc) - timedelta(minutes=1),
         assets=(
             ExchangeAssetPosition(
-                "BTC", Decimal("0.01"), Decimal("100000"), Decimal("1000")
+                "BTC",
+                Decimal("0.01"),
+                Decimal("100000"),
+                Decimal("1000"),
+                "coingecko",
             ),
-            ExchangeAssetPosition("USDT", Decimal("50"), Decimal("1"), Decimal("50")),
+            ExchangeAssetPosition(
+                "USDT", Decimal("50"), Decimal("1"), Decimal("50"), "coingecko"
+            ),
         ),
     )
     with patch("app.routers.portfolio.fetch_exchange_portfolio", return_value=snapshot):
@@ -235,7 +327,9 @@ async def test_summary_uses_exchange_snapshot_for_staleness(
     snapshot = _exchange_snapshot(
         as_of=datetime.now(timezone.utc) - timedelta(minutes=31),
         assets=(
-            ExchangeAssetPosition("USDT", Decimal("25"), Decimal("1"), Decimal("25")),
+            ExchangeAssetPosition(
+                "USDT", Decimal("25"), Decimal("1"), Decimal("25"), "coingecko"
+            ),
         ),
     )
     with patch("app.routers.portfolio.fetch_exchange_portfolio", return_value=snapshot):
@@ -272,7 +366,11 @@ async def test_allocation_includes_exchange_only_in_all_scope(
         as_of=datetime.now(timezone.utc),
         assets=(
             ExchangeAssetPosition(
-                "BTC", Decimal("0.01"), Decimal("100000"), Decimal("1000")
+                "BTC",
+                Decimal("0.01"),
+                Decimal("100000"),
+                Decimal("1000"),
+                "coingecko",
             ),
         ),
     )
@@ -284,3 +382,64 @@ async def test_allocation_includes_exchange_only_in_all_scope(
     assert Decimal(body["total_usd"]) == Decimal("1000")
     assert body["items"][0]["asset_key"] == "exchange:binance:BTC"
     assert body["data_quality"]["sources"] == ["coingecko"]
+
+
+async def test_history_combines_manual_and_timestamped_cex_source_totals(
+    client: AsyncClient,
+    auth_headers: dict,
+    db_session: AsyncSession,
+):
+    created = await client.post(
+        "/wallets",
+        headers=auth_headers,
+        json={
+            "label": "Cash",
+            "wallet_type": "manual",
+            "chain_type": "manual",
+        },
+    )
+    wallet = await db_session.get(Wallet, created.json()["id"])
+    assert wallet is not None
+    now = datetime.now(timezone.utc)
+    run = SnapshotRun(
+        user_id=wallet.user_id,
+        wallet_id=wallet.id,
+        trigger_type="manual",
+        scope_type="wallet",
+        status="success",
+        finished_at=now - timedelta(minutes=2),
+    )
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(
+        WalletSnapshot(
+            snapshot_run_id=run.id,
+            wallet_id=wallet.id,
+            wallet_type="manual",
+            status="success",
+            total_usd=Decimal("25"),
+        )
+    )
+    await db_session.flush()
+    exchange = ExchangePortfolioHistory(
+        status="success",
+        points=(
+            ExchangeHistoryPoint(
+                as_of=now - timedelta(minutes=1),
+                total_usd=Decimal("100"),
+            ),
+        ),
+    )
+
+    with patch("app.routers.portfolio.fetch_exchange_history", return_value=exchange):
+        response = await client.get("/portfolio/history?days=30", headers=auth_headers)
+
+    assert response.status_code == 200
+    points = response.json()["points"]
+    assert Decimal(points[0]["sources"]["onchain_usd"]) == Decimal("0")
+    assert points[0]["sources"]["cex_usd"] is None
+    assert Decimal(points[0]["sources"]["manual_usd"]) == Decimal("25")
+    assert Decimal(points[1]["sources"]["onchain_usd"]) == Decimal("0")
+    assert Decimal(points[1]["sources"]["cex_usd"]) == Decimal("100")
+    assert Decimal(points[1]["sources"]["manual_usd"]) == Decimal("25")
+    assert Decimal(points[1]["total_usd"]) == Decimal("125")

@@ -5,9 +5,16 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+class PortfolioHistorySources(BaseModel):
+    onchain_usd: Decimal
+    cex_usd: Decimal | None
+    manual_usd: Decimal
+
+
 class PortfolioPoint(BaseModel):
     snapshot_at: datetime
     total_usd: Decimal
+    sources: PortfolioHistorySources
 
 
 class PortfolioHistory(BaseModel):
@@ -107,7 +114,14 @@ class PortfolioSelectionScope(BaseModel):
 class PortfolioAllocationQuality(BaseModel):
     state: Literal["complete", "estimated", "incomplete", "unknown", "empty"]
     sources: list[
-        Literal["coingecko", "frankfurter", "manual", "static_dev", "unknown"]
+        Literal[
+            "coingecko",
+            "binance_usdt",
+            "frankfurter",
+            "manual",
+            "static_dev",
+            "unknown",
+        ]
     ]
     assets_priced: int
     assets_total: int
@@ -140,7 +154,14 @@ class PortfolioChainIssue(BaseModel):
 class PortfolioPriceQuality(BaseModel):
     state: Literal["complete", "estimated", "incomplete", "unknown"]
     sources: list[
-        Literal["coingecko", "frankfurter", "manual", "static_dev", "unknown"]
+        Literal[
+            "coingecko",
+            "binance_usdt",
+            "frankfurter",
+            "manual",
+            "static_dev",
+            "unknown",
+        ]
     ]
     assets_priced: int
     assets_total: int
