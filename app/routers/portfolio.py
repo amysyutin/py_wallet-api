@@ -51,6 +51,10 @@ HISTORY_READ_STATUSES = ("success",)
 ALLOCATION_VISIBLE_ASSETS = 5
 
 
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
 def _history_sources(
     balances: dict[int, Decimal],
     wallet_types: dict[int, str],
