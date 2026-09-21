@@ -15,11 +15,17 @@ from app.db.models.telegram import (
     TelegramDigestDelivery,
     TelegramNotificationSettings,
 )
-from app.db.models.snapshot_service import ChainSnapshot, SnapshotRun, WalletSnapshot
+from app.db.models.snapshot_service import (
+    ChainSnapshot,
+    SnapshotBalanceSnapshot,
+    SnapshotRun,
+    WalletSnapshot,
+)
 from app.db.models.user import User
 from app.db.models.wallet import Wallet
 from app.db.models.wallet_group import WalletGroup
 from app.metrics import REGISTRATION_COMPLETED, TELEGRAM_DIGEST
+from app.schemas.portfolio import PortfolioValueChange24h
 from app.services.telegram_auth import TelegramInitDataError, validate_init_data
 from app.services.telegram_daily_balance import (
     TelegramBotClient,
@@ -267,6 +273,7 @@ async def test_telegram_login_is_stable_and_notifications_are_opt_in(
         "timezone": "UTC",
         "daily_at": "09:00:00",
         "language": "ru",
+        "alert_threshold_percent": None,
         "allows_write_to_pm": True,
     }
     updated = await client.patch(
@@ -277,11 +284,13 @@ async def test_telegram_login_is_stable_and_notifications_are_opt_in(
             "timezone": "Asia/Ho_Chi_Minh",
             "daily_at": "13:00:00",
             "language": "en",
+            "alert_threshold_percent": 7.5,
         },
     )
     assert updated.status_code == 200
     assert updated.json()["enabled"] is True
     assert updated.json()["timezone"] == "Asia/Ho_Chi_Minh"
+    assert updated.json()["alert_threshold_percent"] == 7.5
 
     users = list(await db_session.scalars(select(User).where(User.id == user_id)))
     assert len(users) == 1
@@ -317,6 +326,45 @@ async def test_telegram_settings_reject_explicit_null(client, monkeypatch):
         json={"enabled": None},
     )
     assert response.status_code == 422
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_telegram_threshold_can_be_disabled_with_null(client, monkeypatch):
+    configure_telegram(monkeypatch)
+    login = await client.post(
+        "/auth/telegram",
+        json={"init_data": signed_init_data(10006)},
+    )
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    enabled = await client.patch(
+        "/telegram/settings",
+        headers=headers,
+        json={"alert_threshold_percent": 12.5},
+    )
+    assert enabled.status_code == 200
+    assert enabled.json()["alert_threshold_percent"] == 12.5
+
+    disabled = await client.patch(
+        "/telegram/settings",
+        headers=headers,
+        json={"alert_threshold_percent": None},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["alert_threshold_percent"] is None
+
+    too_small = await client.patch(
+        "/telegram/settings",
+        headers=headers,
+        json={"alert_threshold_percent": 0},
+    )
+    too_large = await client.patch(
+        "/telegram/settings",
+        headers=headers,
+        json={"alert_threshold_percent": 1000.1},
+    )
+    assert too_small.status_code == 422
+    assert too_large.status_code == 422
     get_settings.cache_clear()
 
 
@@ -400,6 +448,7 @@ async def _add_digest_snapshot(
     *,
     observed_at: datetime,
     total_usd: Decimal,
+    priced_asset: bool = False,
 ) -> None:
     run = SnapshotRun(
         user_id=wallet.user_id,
@@ -421,15 +470,27 @@ async def _add_digest_snapshot(
     )
     db_session.add(snapshot)
     await db_session.flush()
-    db_session.add(
-        ChainSnapshot(
-            wallet_snapshot_id=snapshot.id,
-            chain="base",
-            status="success",
-            total_usd=total_usd,
-            finished_at=observed_at,
-        )
+    chain_snapshot = ChainSnapshot(
+        wallet_snapshot_id=snapshot.id,
+        chain="base",
+        status="success",
+        total_usd=total_usd,
+        finished_at=observed_at,
     )
+    db_session.add(chain_snapshot)
+    await db_session.flush()
+    if priced_asset:
+        db_session.add(
+            SnapshotBalanceSnapshot(
+                chain_snapshot_id=chain_snapshot.id,
+                asset_symbol="ETH",
+                asset_type="native",
+                amount=Decimal("1"),
+                price_usd=total_usd,
+                value_usd=total_usd,
+                price_source="coingecko",
+            )
+        )
 
 
 @pytest.mark.asyncio
@@ -476,6 +537,78 @@ async def test_daily_balance_is_due_and_idempotent(db_session):
     assert fake.messages[0][3] == "Открыть портфель"
     delivery = await db_session.scalar(select(TelegramDigestDelivery))
     assert delivery.status == "sent"
+
+
+@pytest.mark.asyncio
+async def test_daily_balance_emits_configured_complete_24h_threshold_alert(
+    db_session,
+):
+    user = User(email=None, auth_hash=None)
+    db_session.add(user)
+    await db_session.flush()
+    account = TelegramAccount(
+        user_id=user.id,
+        telegram_user_id=20005,
+        first_name="Test",
+        allows_write_to_pm=True,
+    )
+    db_session.add(account)
+    await db_session.flush()
+    db_session.add(
+        TelegramNotificationSettings(
+            telegram_account_id=account.id,
+            enabled=True,
+            timezone="UTC",
+            daily_at=time(9, 0),
+            language="en",
+            alert_threshold_percent=Decimal("10"),
+        )
+    )
+    now = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0)
+    wallet = Wallet(
+        user_id=user.id,
+        label="Threshold wallet",
+        address="0x0000000000000000000000000000000000000206",
+        chain_type="mainnet",
+        wallet_type="evm",
+        is_active=True,
+        address_updated_at=now - timedelta(days=3),
+    )
+    db_session.add(wallet)
+    await db_session.flush()
+    await _add_digest_snapshot(
+        db_session,
+        wallet,
+        observed_at=now - timedelta(hours=24, minutes=1),
+        total_usd=Decimal("100"),
+        priced_asset=True,
+    )
+    await _add_digest_snapshot(
+        db_session,
+        wallet,
+        observed_at=now - timedelta(minutes=1),
+        total_usd=Decimal("120"),
+        priced_asset=True,
+    )
+    await db_session.commit()
+    config = Settings(
+        app_env="test",
+        jwt_secret="ci-test-secret",
+        telegram_bot_token=BOT_TOKEN,
+        telegram_daily_balance_enabled=True,
+    )
+    fake = FakeTelegramClient()
+
+    result = await send_due_daily_balances(
+        db_session,
+        config,
+        now=now,
+        client=fake,
+    )
+
+    assert result == (1, 0)
+    assert len(fake.messages) == 1
+    assert "⚠️ 24h change: +20.00% (threshold 10.00%)" in fake.messages[0][1]
 
 
 @pytest.mark.asyncio
@@ -683,6 +816,24 @@ def test_daily_balance_formatter_supports_both_languages():
     assert "Total value: $1,234.50" in english
     assert "Coverage: 1/2 wallets" in english
     assert "Data health: Partial" in english
+
+    below_threshold = format_daily_balance(
+        Decimal("105"),
+        language="en",
+        as_of=None,
+        change_24h=PortfolioValueChange24h(
+            status="complete",
+            start_usd=Decimal("100"),
+            end_usd=Decimal("105"),
+            absolute_usd=Decimal("5"),
+            percent=5.0,
+            reference_at=datetime(2026, 9, 11, tzinfo=timezone.utc),
+            cutoff_at=datetime(2026, 9, 10, tzinfo=timezone.utc),
+            reason_codes=[],
+        ),
+        alert_threshold_percent=10,
+    )
+    assert "24h change" not in below_threshold
 
 
 def test_telegram_client_does_not_chain_token_bearing_network_error(monkeypatch):

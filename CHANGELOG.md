@@ -12,8 +12,12 @@ Deployment and platform changes are tracked separately in
 
 ### Added
 
+- Add opt-in portfolio threshold alerts to the daily Telegram digest, emitted
+  only for complete 24-hour value-change comparisons.
+
 - Add timestamped on-chain, CEX, and manual source totals to portfolio history,
   using stored exchange valuations instead of repricing old balances.
+
 - Recognize Frankfurter fiat exchange rates as a complete live price source in
   wallet and portfolio quality contracts.
 - Add validated Solana wallets and expose their persisted snapshot balances in
