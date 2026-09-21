@@ -107,6 +107,8 @@ Authenticated endpoints require `Authorization: Bearer <token>`:
 | `GET` | `/portfolio?wallet_id=<id>&days=30` | Return snapshot history for a wallet (`total_usd` from multi-chain EVM snapshots). |
 | `GET` | `/portfolio/history?group_id=<id>&days=30` | Return history with on-chain, CEX, and manual source totals; CEX is included only in the unfiltered all-wallet scope. |
 | `GET` | `/portfolio/allocation` | Return current allocation; `mode=all` includes exchange assets, while group selections remain wallet-only. |
+| `GET` | `/portfolio/allocation/targets` | Return the authenticated user's global asset-allocation targets. |
+| `PUT` | `/portfolio/allocation/targets` | Atomically replace or clear global allocation targets; non-empty targets must total exactly 100%. |
 | `GET` | `/portfolio/summary` | Return total USD value, top assets, per-source totals, and wallet/exchange health from the latest snapshots. |
 
 New EVM wallets use `chain_type=all`: every snapshot checks the address across
@@ -195,6 +197,17 @@ balances use the valuation stored when the exchange snapshot was collected;
 legacy or partially unpriced CEX snapshots are omitted rather than repriced with
 today's quote. Wallet and group history remain wallet-only. The separate 24-hour
 change contract stays unavailable while current exchange assets are present.
+
+Global allocation targets are stored by stable `asset_key`. A non-empty target
+set must contain unique keys, use at most two decimal places, and total exactly
+`100.00`. `GET /portfolio/allocation` exposes every currently available asset,
+the saved targets, and deterministic rebalancing hints. Positive
+`suggested_usd` means increase the position, negative means reduce it, and a
+one-percentage-point tolerance is reported as `within_target`. Group-filtered
+allocations return `not_applicable`: targets describe the global portfolio only.
+Hints are informational calculations and never submit exchange or wallet
+transactions. When valuation data is not complete, the rebalancing status is
+`incomplete` so clients can avoid presenting the amounts as precise.
 
 `POST /snapshot` uses the same multi-chain EVM scope for stored history, so
 `GET /portfolio?wallet_id=<id>&days=30` can power a chart of the wallet's

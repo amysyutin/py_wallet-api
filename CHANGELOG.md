@@ -12,6 +12,8 @@ Deployment and platform changes are tracked separately in
 
 ### Added
 
+- Add persisted, user-scoped allocation targets with deterministic deviation and
+  rebalancing hints for the global portfolio.
 - Add timestamped on-chain, CEX, and manual source totals to portfolio history,
   using stored exchange valuations instead of repricing old balances.
 - Recognize Frankfurter fiat exchange rates as a complete live price source in

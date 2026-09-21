@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.db.models.allocation_target import AllocationTarget
     from app.db.models.telegram import TelegramAccount
     from app.db.models.wallet import Wallet
     from app.db.models.wallet_group import WalletGroup
@@ -47,6 +48,9 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan"
     )
     wallet_groups: Mapped[list[WalletGroup]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    allocation_targets: Mapped[list[AllocationTarget]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
     telegram_account: Mapped[TelegramAccount | None] = relationship(

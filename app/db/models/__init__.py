@@ -1,4 +1,5 @@
 from app.db.base import Base
+from app.db.models.allocation_target import AllocationTarget
 from app.db.models.asset import Asset
 from app.db.models.balance_snapshot import BalanceSnapshot
 from app.db.models.manual_balance import ManualBalance
@@ -22,6 +23,7 @@ from app.db.models.wallet_group import WalletGroup
 
 __all__ = [
     "Base",
+    "AllocationTarget",
     "User",
     "Wallet",
     "WalletGroup",

@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class PortfolioHistorySources(BaseModel):
@@ -32,6 +32,73 @@ class AssetShare(BaseModel):
 
 class AllocationAssetShare(AssetShare):
     asset_key: str
+
+
+class AllocationTargetItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_key: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9:_\-.]+$")
+    symbol: str = Field(min_length=1, max_length=32)
+    target_pct: Decimal = Field(gt=0, le=100)
+
+    @field_validator("asset_key", "symbol")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("value cannot be blank")
+        return stripped
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_symbol(cls, value: str) -> str:
+        return value.upper()
+
+    @field_validator("target_pct")
+    @classmethod
+    def require_percentage_precision(cls, value: Decimal) -> Decimal:
+        if value.as_tuple().exponent < -2:
+            raise ValueError("target_pct supports at most two decimal places")
+        return value.quantize(Decimal("0.01"))
+
+
+class PortfolioAllocationTargets(BaseModel):
+    items: list[AllocationTargetItem]
+
+
+class PortfolioAllocationTargetsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[AllocationTargetItem] = Field(max_length=50)
+
+    @model_validator(mode="after")
+    def validate_distribution(self) -> "PortfolioAllocationTargetsUpdate":
+        keys = [item.asset_key for item in self.items]
+        if len(keys) != len(set(keys)):
+            raise ValueError("asset_key values must be unique")
+        if "__other__" in keys:
+            raise ValueError("the synthetic Other allocation cannot be targeted")
+        total = sum((item.target_pct for item in self.items), Decimal("0"))
+        if self.items and total != Decimal("100.00"):
+            raise ValueError("allocation targets must add up to 100.00")
+        return self
+
+
+class PortfolioRebalancingItem(BaseModel):
+    asset_key: str
+    symbol: str
+    current_usd: Decimal
+    current_pct: float
+    target_pct: float
+    deviation_pct: float
+    suggested_usd: Decimal
+    action: Literal["increase", "reduce", "within_target"]
+
+
+class PortfolioRebalancing(BaseModel):
+    status: Literal["not_applicable", "not_configured", "empty", "ready", "incomplete"]
+    tolerance_pct: float
+    items: list[PortfolioRebalancingItem]
 
 
 class PortfolioAllScope(BaseModel):
@@ -65,6 +132,15 @@ class PortfolioAllocation(BaseModel):
     wallets_count: int
     total_usd: Decimal
     items: list[AllocationAssetShare]
+    available_assets: list[AllocationAssetShare] = Field(default_factory=list)
+    targets: list[AllocationTargetItem] = Field(default_factory=list)
+    rebalancing: PortfolioRebalancing = Field(
+        default_factory=lambda: PortfolioRebalancing(
+            status="not_configured",
+            tolerance_pct=1.0,
+            items=[],
+        )
+    )
     data_quality: PortfolioAllocationQuality
 
 

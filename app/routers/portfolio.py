@@ -2,10 +2,11 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from starlette.concurrency import run_in_threadpool
 
 from app.db.models.asset import Asset
+from app.db.models.allocation_target import AllocationTarget
 from app.db.models.balance_snapshot import BalanceSnapshot
 from app.db.models.snapshot import Snapshot
 from app.core.config import get_settings
@@ -21,8 +22,11 @@ from app.deps import CurrentUser, SessionDep
 from app.schemas.portfolio import (
     AssetShare,
     AllocationAssetShare,
+    AllocationTargetItem,
     PortfolioAllocation,
     PortfolioAllocationQuality,
+    PortfolioAllocationTargets,
+    PortfolioAllocationTargetsUpdate,
     PortfolioAllScope,
     PortfolioChainIssue,
     PortfolioExchangeHealth,
@@ -30,6 +34,8 @@ from app.schemas.portfolio import (
     PortfolioHistorySources,
     PortfolioPoint,
     PortfolioPriceQuality,
+    PortfolioRebalancing,
+    PortfolioRebalancingItem,
     PortfolioSelectionScope,
     PortfolioSourceSummary,
     PortfolioSummary,
@@ -51,6 +57,7 @@ from app.services.portfolio_health import (
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 HISTORY_READ_STATUSES = ("success",)
 ALLOCATION_VISIBLE_ASSETS = 5
+REBALANCING_TOLERANCE_PCT = 1.0
 
 
 def _history_sources(
@@ -112,12 +119,105 @@ def _allocation_quality(
     return PortfolioAllocationQuality(**quality.model_dump())
 
 
+async def _allocation_targets(
+    session: SessionDep,
+    *,
+    user_id: int,
+) -> list[AllocationTarget]:
+    return list(
+        await session.scalars(
+            select(AllocationTarget)
+            .where(AllocationTarget.user_id == user_id)
+            .order_by(AllocationTarget.asset_key)
+        )
+    )
+
+
+def _target_items(targets: list[AllocationTarget]) -> list[AllocationTargetItem]:
+    return [
+        AllocationTargetItem(
+            asset_key=target.asset_key,
+            symbol=target.symbol,
+            target_pct=target.target_pct,
+        )
+        for target in targets
+    ]
+
+
+def _build_rebalancing(
+    *,
+    asset_totals: dict[str, tuple[str, Decimal]],
+    total_usd: Decimal,
+    quality: PortfolioAllocationQuality,
+    targets: list[AllocationTarget] | None,
+) -> PortfolioRebalancing:
+    if targets is None:
+        return PortfolioRebalancing(
+            status="not_applicable",
+            tolerance_pct=REBALANCING_TOLERANCE_PCT,
+            items=[],
+        )
+    if not targets:
+        return PortfolioRebalancing(
+            status="not_configured",
+            tolerance_pct=REBALANCING_TOLERANCE_PCT,
+            items=[],
+        )
+    if total_usd <= Decimal("0"):
+        return PortfolioRebalancing(
+            status="empty",
+            tolerance_pct=REBALANCING_TOLERANCE_PCT,
+            items=[],
+        )
+
+    targets_by_key = {target.asset_key: target for target in targets}
+    item_keys = set(asset_totals) | set(targets_by_key)
+    items: list[PortfolioRebalancingItem] = []
+    for asset_key in item_keys:
+        target = targets_by_key.get(asset_key)
+        symbol, current_usd = asset_totals.get(
+            asset_key,
+            (target.symbol if target is not None else asset_key, Decimal("0")),
+        )
+        target_pct = target.target_pct if target is not None else Decimal("0")
+        current_pct = current_usd / total_usd * Decimal("100")
+        deviation_pct = current_pct - target_pct
+        suggested_usd = (
+            total_usd * target_pct / Decimal("100") - current_usd
+        ).quantize(Decimal("0.01"))
+        if abs(deviation_pct) <= Decimal(str(REBALANCING_TOLERANCE_PCT)):
+            action = "within_target"
+        elif suggested_usd > Decimal("0"):
+            action = "increase"
+        else:
+            action = "reduce"
+        items.append(
+            PortfolioRebalancingItem(
+                asset_key=asset_key,
+                symbol=symbol,
+                current_usd=current_usd,
+                current_pct=round(float(current_pct), 2),
+                target_pct=float(target_pct),
+                deviation_pct=round(float(deviation_pct), 2),
+                suggested_usd=suggested_usd,
+                action=action,
+            )
+        )
+    items.sort(key=lambda item: (-abs(item.suggested_usd), item.asset_key))
+    return PortfolioRebalancing(
+        status="ready" if quality.state == "complete" else "incomplete",
+        tolerance_pct=REBALANCING_TOLERANCE_PCT,
+        items=items,
+    )
+
+
 async def _allocation_for_wallets(
     session: SessionDep,
     wallets: list[Wallet],
     *,
     scope: PortfolioAllScope | PortfolioSelectionScope,
     exchange: ExchangePortfolioSnapshot | None = None,
+    targets: list[AllocationTarget] | None = None,
 ) -> PortfolioAllocation:
     balance_info = await build_wallet_balance_info(session, wallets)
     asset_totals: dict[str, tuple[str, Decimal]] = {}
@@ -240,6 +340,7 @@ async def _allocation_for_wallets(
             )
 
     total = sum((value for _, value in asset_totals.values()), Decimal("0"))
+    quality = _allocation_quality(observations)
     ordered = sorted(
         asset_totals.items(),
         key=lambda item: item[1][1],
@@ -256,6 +357,15 @@ async def _allocation_for_wallets(
         )
         for asset_key, (symbol, value_usd) in visible
     ]
+    available_assets = [
+        AllocationAssetShare(
+            asset_key=asset_key,
+            symbol=symbol,
+            usd_value=value_usd,
+            share_pct=round(float(value_usd / total * 100), 2) if total else 0.0,
+        )
+        for asset_key, (symbol, value_usd) in ordered
+    ]
     other_value = sum((value for _, (_, value) in remainder), Decimal("0"))
     if other_value:
         items.append(
@@ -271,7 +381,15 @@ async def _allocation_for_wallets(
         wallets_count=len(wallets),
         total_usd=total,
         items=items,
-        data_quality=_allocation_quality(observations),
+        available_assets=available_assets,
+        targets=_target_items(targets or []),
+        rebalancing=_build_rebalancing(
+            asset_totals=asset_totals,
+            total_usd=total,
+            quality=quality,
+            targets=targets,
+        ),
+        data_quality=quality,
     )
 
 
@@ -923,18 +1041,55 @@ async def portfolio_allocation(
             include_ungrouped=include_ungrouped,
         )
     exchange = None
+    targets = None
     if mode == "all":
         exchange = await run_in_threadpool(
             fetch_exchange_portfolio,
             get_settings(),
             user_id=current_user.id,
         )
+        targets = await _allocation_targets(session, user_id=current_user.id)
     return await _allocation_for_wallets(
         session,
         wallets,
         scope=scope,
         exchange=exchange,
+        targets=targets,
     )
+
+
+@router.get("/allocation/targets", response_model=PortfolioAllocationTargets)
+async def get_allocation_targets(
+    current_user: CurrentUser,
+    session: SessionDep,
+) -> PortfolioAllocationTargets:
+    targets = await _allocation_targets(session, user_id=current_user.id)
+    return PortfolioAllocationTargets(items=_target_items(targets))
+
+
+@router.put("/allocation/targets", response_model=PortfolioAllocationTargets)
+async def replace_allocation_targets(
+    payload: PortfolioAllocationTargetsUpdate,
+    current_user: CurrentUser,
+    session: SessionDep,
+) -> PortfolioAllocationTargets:
+    await session.execute(
+        delete(AllocationTarget).where(AllocationTarget.user_id == current_user.id)
+    )
+    session.add_all(
+        [
+            AllocationTarget(
+                user_id=current_user.id,
+                asset_key=item.asset_key,
+                symbol=item.symbol,
+                target_pct=item.target_pct,
+            )
+            for item in payload.items
+        ]
+    )
+    await session.commit()
+    targets = await _allocation_targets(session, user_id=current_user.id)
+    return PortfolioAllocationTargets(items=_target_items(targets))
 
 
 @router.get("/summary", response_model=PortfolioSummary)
